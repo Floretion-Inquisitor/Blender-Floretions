@@ -15,12 +15,47 @@ from bpy.props import (
 from . import seeds
 
 
+_VG_UI_PALETTE = {
+    "0":  (0.10, 0.10, 0.10, 1.0),
+    "1":  (0.10, 0.25, 0.95, 1.0),
+    "2":  (0.10, 0.75, 0.85, 1.0),
+    "3":  (0.15, 0.85, 0.20, 1.0),
+    "4":  (0.95, 0.85, 0.15, 1.0),
+    "5":  (0.95, 0.55, 0.10, 1.0),
+    "6":  (0.95, 0.15, 0.15, 1.0),
+    "7p": (0.80, 0.15, 0.85, 1.0),
+}
+
+
+# -------------------------------------------------------------------
+# Guardie anti-cascata update
+# -------------------------------------------------------------------
+
+_BULK_UPDATES = 0
+
+
+def _bulk_updates_on() -> None:
+    global _BULK_UPDATES
+    _BULK_UPDATES += 1
+
+
+def _bulk_updates_off() -> None:
+    global _BULK_UPDATES
+    _BULK_UPDATES = max(0, int(_BULK_UPDATES) - 1)
+
+
+def _is_bulk_updating() -> bool:
+    return bool(_BULK_UPDATES > 0)
+
+
 # ---------------------------------------------------------------------
 # Camera (LookAt + Lens) — NON triggera rebuild
 # ---------------------------------------------------------------------
 
 def _update_camera_settings(self, context):
     """Aggiorna LookAt e Lens della camera senza spostarla e senza rebuild."""
+    if _is_bulk_updating():
+        return
     try:
         from . import camera_ops
         scene = context.scene if context and getattr(context, "scene", None) else bpy.context.scene
@@ -80,18 +115,107 @@ def _trigger_cached_rebuild_safe():
             pass
 
 
+_COLOR_RECOLOR_SCHEDULED = False
+
+
+def _trigger_recolor_only_safe():
+    """Aggiorna solo i colori/materiale usando la cache, senza rifare la mesh."""
+    global _COLOR_RECOLOR_SCHEDULED
+    if _COLOR_RECOLOR_SCHEDULED:
+        return
+    _COLOR_RECOLOR_SCHEDULED = True
+
+    def _run():
+        global _COLOR_RECOLOR_SCHEDULED
+        _COLOR_RECOLOR_SCHEDULED = False
+        try:
+            from .ops_build_core import refresh_colors_from_cache
+            scene = getattr(bpy.context, "scene", None)
+            props = getattr(scene, "floretion_mesh_settings", None) if scene is not None else None
+            ok = False
+            if props is not None:
+                ok = bool(refresh_colors_from_cache(bpy.context, props))
+            if not ok:
+                _trigger_cached_rebuild_safe()
+        except Exception as e:
+            print("[floretion_triangle_mesh] recolor-only failed, fallback rebuild:", e)
+            _trigger_cached_rebuild_safe()
+        return None
+
+    try:
+        bpy.app.timers.register(_run, first_interval=0.03)
+    except Exception:
+        try:
+            _run()
+        except Exception:
+            pass
+
+
+def _update_color_mode(self, context):
+    """Cambio Color mode: prova un refresh colori/materiale senza rebuild mesh."""
+    if _is_bulk_updating():
+        return
+    _trigger_recolor_only_safe()
+
+
 def _update_mesh_settings(self, context):
     """Callback per le proprietà di Mesh Construction (NO recompute X·Y).
 
     Idea: questi slider/dropdown devono solo aggiornare la *visualizzazione*
     (mesh/materiali) usando la cache dell'ultimo X·Y calcolato, se esiste.
     """
+    if _is_bulk_updating():
+        return
     _trigger_cached_rebuild_safe()
+
+
+def _update_vg_materials_toggle(self, context):
+    """Compat legacy.
+
+    Il display dell'add-on non usa più l'auto-assegnamento dei materiali VG:
+    i colori neighbor/quantile passano dal materiale base + attributi shader.
+    Manteniamo quindi questo toggle come no-op morbido e facciamo solo un
+    refresh della mesh per ripulire eventuali vecchi material_index.
+    """
+    if _is_bulk_updating():
+        return
+    _trigger_cached_rebuild_safe()
+
 
 
 # -------------------------------------------------------------------
 # Callbacks di update
 # -------------------------------------------------------------------
+
+def _reset_mask_offsets_to_default(props) -> None:
+    for nm in (
+        "mask_bin_0", "mask_bin_1", "mask_bin_2", "mask_bin_3",
+        "mask_bin_4", "mask_bin_5", "mask_bin_6", "mask_bin_7p",
+    ):
+        try:
+            setattr(props, nm, 0.0)
+        except Exception:
+            pass
+
+
+def _reset_vg_wall_modes_to_default(props) -> None:
+    for nm in (
+        "vg_wall_0", "vg_wall_1", "vg_wall_2", "vg_wall_3",
+        "vg_wall_4", "vg_wall_5", "vg_wall_6", "vg_wall_7p",
+    ):
+        try:
+            setattr(props, nm, False)
+        except Exception:
+            pass
+
+
+def _reset_standard_materials_for_new_order() -> None:
+    try:
+        from .shader_neighbor_nodes import reset_floretion_materials_and_nodes
+        reset_floretion_materials_and_nodes()
+    except Exception as e:
+        print("[floretion_triangle_mesh] material reset on order change failed:", e)
+
 
 def _update_typical_order(self, context):
     """
@@ -99,6 +223,7 @@ def _update_typical_order(self, context):
     - resetta X e Y all'unit (1 e.e)
     - resetta i nomi typical (unit)
     - pulisce Z e log
+    - resetta i controlli costosi/di extend ai default
     """
     order = max(1, int(self.typical_order))
 
@@ -109,18 +234,59 @@ def _update_typical_order(self, context):
         unit_str = f"1{'e' * order}"
         self.log_message = f"Error building unit floretion for order {order}: {e}"
 
-    self.x_string = unit_str
-    self.y_string = unit_str
-    self.z_string = ""
+    _bulk_updates_on()
+    try:
+        self.x_string = unit_str
+        self.y_string = unit_str
+        self.z_string = ""
 
-    self.typical_name_x = "unit"
-    self.typical_name_y = "unit"
+        self.typical_name_x = "unit"
+        self.typical_name_y = "unit"
 
-    self.x_prev_text = ""
-    self.x_next_text = ""
-    self.y_prev_text = ""
-    self.y_next_text = ""
+        self.x_prev_text = ""
+        self.x_next_text = ""
+        self.y_prev_text = ""
+        self.y_next_text = ""
+        try:
+            self.z_prev_text = ""
+            self.z_next_text = ""
+        except Exception:
+            pass
 
+        try:
+            self.extend_level = "1"
+        except Exception:
+            pass
+
+        for nm, val in (
+            ("extend_mesh", False),
+            ("extend_cent", False),
+            ("extend_curve", False),
+            ("show_centroids", False),
+            ("show_curve", False),
+            ("use_tetrahedral", False),
+        ):
+            try:
+                setattr(self, nm, val)
+            except Exception:
+                pass
+
+        try:
+            self.extrusion_depth = 0.0
+        except Exception:
+            pass
+
+        try:
+            self.tile_area_scaling_mode = "none"
+        except Exception:
+            pass
+
+        _reset_mask_offsets_to_default(self)
+        _reset_vg_wall_modes_to_default(self)
+    finally:
+        _bulk_updates_off()
+
+    _reset_standard_materials_for_new_order()
     _trigger_rebuild_safe()
 
 
@@ -307,6 +473,17 @@ class FloretionMeshSettings(bpy.types.PropertyGroup):
         default="",
     )
 
+    z_prev_text: StringProperty(
+        name="Z previous",
+        description="Previous Z text for Back",
+        default="",
+    )
+    z_next_text: StringProperty(
+        name="Z next",
+        description="Next Z text for Forward",
+        default="",
+    )
+
     # Parametri di costruzione mesh
     spacing: StringProperty(
         name="Spacing",
@@ -330,12 +507,114 @@ class FloretionMeshSettings(bpy.types.PropertyGroup):
         update=_update_mesh_settings,
     )
 
+    extend_level: EnumProperty(
+        name="Extend",
+        description="Quante iterazioni di mirror outward applicare",
+        items=[
+            ("1", "1", "Una iterazione"),
+            ("2", "2", "Due iterazioni"),
+        ],
+        default="1",
+        update=_update_mesh_settings,
+    )
 
+    extend_mesh: BoolProperty(
+        name="Extend Flo_mesh",
+        description="Estende la mesh Flo_* con copie specchiate sui lati",
+        default=False,
+        update=_update_mesh_settings,
+    )
+
+    extend_cent: BoolProperty(
+        name="Extend Flo_cent",
+        description="Estende anche Flo_*_cent",
+        default=False,
+        update=_update_mesh_settings,
+    )
+
+    extend_curve: BoolProperty(
+        name="Extend Flo_curve",
+        description="Estende anche Flo_*_curve",
+        default=False,
+        update=_update_mesh_settings,
+    )
+
+
+    use_tetrahedral: BoolProperty(
+        name="Tetrahedral",
+        description="Crea anche la rappresentazione tetraedrica separata (Flo_*_tetra), mantenendo Flo_X / Flo_Y / Flo_X·Y come riferimento piatto",
+        default=False,
+        update=_update_mesh_settings,
+    )
+
+    vg_create_materials: BoolProperty(
+        name="Create materials",
+        description="Crea/rimuove automaticamente i materiali dei Vertex Groups nella sezione Vertex Group Extrusion",
+        default=False,
+        update=_update_vg_materials_toggle,
+    )
+
+
+    mask_bin_0: FloatProperty(
+        name="0",
+        description="Offset lineare per FLO_NEI_NEI_BOTH_0",
+        default=0.0,
+        min=-2.0,
+        max=2.0,
+        soft_min=-2.0,
+        soft_max=2.0,
+        update=_update_mesh_settings,
+    )
+    mask_bin_1: FloatProperty(name="1", description="Offset lineare per FLO_NEI_NEI_BOTH_1", default=0.0, min=-2.0, max=2.0, soft_min=-2.0, soft_max=2.0, update=_update_mesh_settings)
+    mask_bin_2: FloatProperty(name="2", description="Offset lineare per FLO_NEI_NEI_BOTH_2", default=0.0, min=-2.0, max=2.0, soft_min=-2.0, soft_max=2.0, update=_update_mesh_settings)
+    mask_bin_3: FloatProperty(name="3", description="Offset lineare per FLO_NEI_NEI_BOTH_3", default=0.0, min=-2.0, max=2.0, soft_min=-2.0, soft_max=2.0, update=_update_mesh_settings)
+    mask_bin_4: FloatProperty(name="4", description="Offset lineare per FLO_NEI_NEI_BOTH_4", default=0.0, min=-2.0, max=2.0, soft_min=-2.0, soft_max=2.0, update=_update_mesh_settings)
+    mask_bin_5: FloatProperty(name="5", description="Offset lineare per FLO_NEI_NEI_BOTH_5", default=0.0, min=-2.0, max=2.0, soft_min=-2.0, soft_max=2.0, update=_update_mesh_settings)
+    mask_bin_6: FloatProperty(name="6", description="Offset lineare per FLO_NEI_NEI_BOTH_6", default=0.0, min=-2.0, max=2.0, soft_min=-2.0, soft_max=2.0, update=_update_mesh_settings)
+    mask_bin_7p: FloatProperty(
+        name="7+",
+        description="Offset lineare per FLO_NEI_NEI_BOTH_7P",
+        default=0.0,
+        min=-2.0,
+        max=2.0,
+        soft_min=-2.0,
+        soft_max=2.0,
+        update=_update_mesh_settings,
+    )
+
+
+    vg_wall_0: BoolProperty(name="Walls 0", description="Se attivo, il VG 0 crea pareti laterali invece di lasciare un foro", default=False, update=_update_mesh_settings)
+    vg_wall_1: BoolProperty(name="Walls 1", description="Se attivo, il VG 1 crea pareti laterali invece di lasciare un foro", default=False, update=_update_mesh_settings)
+    vg_wall_2: BoolProperty(name="Walls 2", description="Se attivo, il VG 2 crea pareti laterali invece di lasciare un foro", default=False, update=_update_mesh_settings)
+    vg_wall_3: BoolProperty(name="Walls 3", description="Se attivo, il VG 3 crea pareti laterali invece di lasciare un foro", default=False, update=_update_mesh_settings)
+    vg_wall_4: BoolProperty(name="Walls 4", description="Se attivo, il VG 4 crea pareti laterali invece di lasciare un foro", default=False, update=_update_mesh_settings)
+    vg_wall_5: BoolProperty(name="Walls 5", description="Se attivo, il VG 5 crea pareti laterali invece di lasciare un foro", default=False, update=_update_mesh_settings)
+    vg_wall_6: BoolProperty(name="Walls 6", description="Se attivo, il VG 6 crea pareti laterali invece di lasciare un foro", default=False, update=_update_mesh_settings)
+    vg_wall_7p: BoolProperty(name="Walls 7+", description="Se attivo, il VG 7+ crea pareti laterali invece di lasciare un foro", default=False, update=_update_mesh_settings)
+
+    vg_color_0: FloatVectorProperty(name="VG 0 Color", subtype='COLOR', size=4, default=_VG_UI_PALETTE["0"], min=0.0, max=1.0)
+    vg_color_1: FloatVectorProperty(name="VG 1 Color", subtype='COLOR', size=4, default=_VG_UI_PALETTE["1"], min=0.0, max=1.0)
+    vg_color_2: FloatVectorProperty(name="VG 2 Color", subtype='COLOR', size=4, default=_VG_UI_PALETTE["2"], min=0.0, max=1.0)
+    vg_color_3: FloatVectorProperty(name="VG 3 Color", subtype='COLOR', size=4, default=_VG_UI_PALETTE["3"], min=0.0, max=1.0)
+    vg_color_4: FloatVectorProperty(name="VG 4 Color", subtype='COLOR', size=4, default=_VG_UI_PALETTE["4"], min=0.0, max=1.0)
+    vg_color_5: FloatVectorProperty(name="VG 5 Color", subtype='COLOR', size=4, default=_VG_UI_PALETTE["5"], min=0.0, max=1.0)
+    vg_color_6: FloatVectorProperty(name="VG 6 Color", subtype='COLOR', size=4, default=_VG_UI_PALETTE["6"], min=0.0, max=1.0)
+    vg_color_7p: FloatVectorProperty(name="VG 7+ Color", subtype='COLOR', size=4, default=_VG_UI_PALETTE["7p"], min=0.0, max=1.0)
+
+
+    create_vertex_groups: BoolProperty(
+        name="Vertex groups",
+        description="Vertex groups based on neighboring tiles",
+        default=False,
+        update=_update_mesh_settings,
+    )
+    
+    
     height_mode: EnumProperty(
         name="Height mode",
-        description="How to map floretion coefficients to Z heights",
+        description="How to map floretion coefficients to tile heights",
         items=[
-            ("flat", "Flat", "No Z displacement"),
+            ("flat", "Flat", "No height displacement"),
             ("coeff", "Coeff", "Height depends on coefficient sign/magnitude"),
             ("index", "Index", "Height depends on base vector index"),
         ],
@@ -345,8 +624,78 @@ class FloretionMeshSettings(bpy.types.PropertyGroup):
 
     max_height: StringProperty(
         name="Max height",
-        description="Maximum absolute height for coeff/index mapping",
+        description="Maximum absolute height / tetra scale",
         default="2.0",
+        update=_update_mesh_settings,
+    )
+
+    coeff_height_scale_mode: EnumProperty(
+        name="Coeff height scale",
+        description=(
+            "Per Height=Coeff: i coefficienti vengono sempre normalizzati a max abs = 1, poi trasformati e clippati. "
+            "Linear usa il coefficiente normalizzato; Log comprime gli outlier con sign(c) * log10(1+|c|)."
+        ),
+        items=[
+            ("linear", "Linear", "Usa il coefficiente trasformato linearmente"),
+            ("log", "Log", "Usa sign(c) * log10(1+|c|) per comprimere gli outlier"),
+        ],
+        default="linear",
+        update=_update_mesh_settings,
+    )
+
+    coeff_height_clip: FloatProperty(
+        name="Coeff height clip",
+        description=(
+            "Clamp finale del coefficiente usato per l'altezza dopo trasformazione/normalizzazione. "
+            "1.0 = dentro [-1,1]. Utile per evitare esplosioni del viewport."
+        ),
+        default=1.0,
+        min=0.05,
+        soft_min=0.1,
+        soft_max=2.0,
+        max=10.0,
+        update=_update_mesh_settings,
+    )
+
+    tile_area_scaling_mode: EnumProperty(
+        name="Tile area scaling (relative)",
+        description="Ridimensiona ogni tile attorno al proprio centroid mantenendo fermo il centro; i neighbor colors restano basati sulla geometria canonica",
+        items=[
+            ("none", "None", "Non scalare l'area dei tile"),
+            ("coeff_abs", "Scale tile area by abs(coeff)", "Area relativa = abs(coeff); il lato scala come sqrt(abs(coeff))"),
+            ("coeff_log", "Scale tile area by log(abs(coeff))", "Per abs(coeff) < 1 coincide col lineare; oltre 1 usa 1 + log10(abs(coeff))"),
+        ],
+        default="none",
+        update=_update_mesh_settings,
+    )
+
+    tetra_coeff_radial_mode: EnumProperty(
+        name="Tetra radial coeff scaling",
+        description=(
+            "Solo per Tetrahedral + Height=Coeff: moltiplica radialmente la distanza del tile dal tile unitario "
+            "ee...e. 'Linear' usa direttamente il coefficiente (flip se negativo). "
+            "'Log' coincide col lineare per abs(coeff) < 1 e usa sign(coeff) * (1 + log10(abs(coeff))) oltre 1."
+        ),
+        items=[
+            ("none", "None", "Nessuna moltiplicazione radiale extra"),
+            ("coeff", "Scale distance by coeff", "Scala la distanza dal tile unitario con il coefficiente"),
+            ("coeff_log", "Scale distance by log(abs(coeff))", "Per abs(coeff) < 1 coincide col lineare; oltre 1 usa 1 + log10(abs(coeff)) con segno"),
+        ],
+        default="coeff",
+        update=_update_mesh_settings,
+    )
+
+    tetra_coeff_radial_amount: FloatProperty(
+        name="Tetra radial amount",
+        description=(
+            "Interpolazione 0..1 verso la scala radiale coeff-based. "
+            "0 = nessun effetto, 1 = effetto completo. È animabile con keyframe."
+        ),
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        soft_min=0.0,
+        soft_max=1.0,
         update=_update_mesh_settings,
     )
 
@@ -362,6 +711,9 @@ class FloretionMeshSettings(bpy.types.PropertyGroup):
             ('GRAY',             "Gray",             ""),
             ('BANDED',           "Banded",           ""),
             ('LEGACY',           "Legacy",           ""),
+            ('QUANTILE_2',       "Quantile 2 colors", "Divide abs(coeff) into 2 quantile buckets and color via shader palette"),
+            ('QUANTILE_4',       "Quantile 4 colors", "Divide abs(coeff) into 4 quantile buckets and color via shader palette"),
+            ('QUANTILE_8',       "Quantile 8 colors", "Divide abs(coeff) into 8 quantile buckets and color via shader palette"),
 
             # newer modes from lib.triangleize_utils.coloring (if your adapter supports them)
             ('PASTEL',           "Pastel",           ""),
@@ -380,8 +732,71 @@ class FloretionMeshSettings(bpy.types.PropertyGroup):
             ('NEIGH_EDGE_SAT',    "Neighbors (Edges+Verts)", "Color by count of neighbors sharing an edge OR a vertex (non-zero tiles)"),
         ],
         default='ABS_HSV',
-        update=_update_mesh_settings,
+        update=_update_color_mode,
     )
+
+    # Nuova interpretazione del pannello: famiglia colore + sottomodo.
+    # Manteniamo anche `color_mode` legacy per compatibilità interna / file vecchi.
+    color_family: EnumProperty(
+        name="Color family",
+        description="High-level color family used by the add-on panel",
+        items=[
+            ('STATIC',   "Static",         "Static coefficient-based palettes"),
+            ('NEIGHBOR', "Neighbor based", "Topological neighbor-count based colors"),
+            ('QUANTILE', "Quantile based", "Quantile palettes based on abs(coeff)"),
+        ],
+        default='STATIC',
+        update=_update_color_mode,
+    )
+
+    static_color_mode: EnumProperty(
+        name="Static colors",
+        description="Static coefficient-based palette",
+        items=[
+            ('ABS_HSV',          "Abs HSV",          ""),
+            ('LOG_HSV',          "Log HSV",          ""),
+            ('DIVERGING',        "Diverging",        ""),
+            ('GRAY',             "Gray",             ""),
+            ('BANDED',           "Banded",           ""),
+            ('LEGACY',           "Legacy",           ""),
+            ('PASTEL',           "Pastel",           ""),
+            ('PASTEL_DIVERGING', "Pastel Diverging", ""),
+            ('COOLWARM',         "Coolwarm",         ""),
+            ('HEAT',             "Heat",             ""),
+            ('NEON',             "Neon",             ""),
+            ('SAT_ONLY',         "Sat Only",         ""),
+            ('DISTANCE_HSV',     "Distance HSV",     ""),
+            ('BANDED_PASTEL',    "Banded Pastel",    ""),
+            ('INK',              "Ink",              ""),
+        ],
+        default='ABS_HSV',
+        update=_update_color_mode,
+    )
+
+    neighbor_color_mode: EnumProperty(
+        name="Neighbor colors",
+        description="Neighbor-based palette",
+        items=[
+            ('NEIGH_EDGE_HUE', "Edges",        "Color by count of edge-neighbors"),
+            ('NEIGH_VERT_HUE', "Vertices",     "Color by count of vertex-only neighbors"),
+            ('NEIGH_EDGE_SAT', "Edges+Verts",  "Color by count of edge OR vertex neighbors"),
+        ],
+        default='NEIGH_EDGE_SAT',
+        update=_update_color_mode,
+    )
+
+    quantile_color_mode: EnumProperty(
+        name="Quantile colors",
+        description="Quantile palette based on abs(coeff)",
+        items=[
+            ('QUANTILE_2', "Quantile 2", ""),
+            ('QUANTILE_4', "Quantile 4", ""),
+            ('QUANTILE_8', "Quantile 8", ""),
+        ],
+        default='QUANTILE_8',
+        update=_update_color_mode,
+    )
+
 
     # Emission e spessore "skyline"
     emission_strength: FloatProperty(
@@ -438,13 +853,16 @@ class FloretionMeshSettings(bpy.types.PropertyGroup):
 
     camera_lookat: EnumProperty(
         name="LookAt",
-        description="Fissa la direzione della camera verso il centro di X / Y / X·Y senza spostare la camera",
+        description="Fissa la direzione della camera verso il centro di X / Y / X·Y / tetra senza spostare la camera",
         items=[
-            ("NONE", "None", "Nessun vincolo LookAt"),
-            ("X",    "X",    "Guarda il centro di Flo_X"),
-            ("Y",    "Y",    "Guarda il centro di Flo_Y"),
-            ("XY",   "X·Y",  "Guarda il centro di Flo_XY"),
-            ("ALL",  "All",  "Guarda il centro combinato X/Y/X·Y"),
+            ("NONE",   "None",   "Nessun vincolo LookAt"),
+            ("X",      "X",      "Guarda il centro di Flo_X"),
+            ("Y",      "Y",      "Guarda il centro di Flo_Y"),
+            ("XY",     "X·Y",    "Guarda il centro di Flo_XY"),
+            ("ALL",    "All",    "Guarda il centro combinato X/Y/X·Y"),
+            ("X_TET",  "X_tet",  "Guarda il centro di Flo_X_tetra"),
+            ("Y_TET",  "Y_tet",  "Guarda il centro di Flo_Y_tetra"),
+            ("XY_TET", "XY_tet", "Guarda il centro di Flo_XY_tetra"),
         ],
         default="XY",
         update=_update_camera_settings,
@@ -479,23 +897,25 @@ class FloretionMeshSettings(bpy.types.PropertyGroup):
     # --------------------------------------------------
     # Vertex Groups (Glow Masks) da NEI_BOTH
     # --------------------------------------------------
-    vg_target: EnumProperty(
-        name="VG Target",
-        description="Su quali oggetti Flo_* creare i vertex groups",
-        items=[
-            ('ALL', "All", ""),
-            ('X',   "X",   "Flo_X"),
-            ('Y',   "Y",   "Flo_Y"),
-            ('XY',  "X·Y", "Flo_XY"),
-        ],
-        default='X',
-    )
 
-    vg_clear_existing: BoolProperty(
-        name="Clear existing",
-        description="Rimuove prima i vertex groups FLO_NEI_* e pulisce eventuali FLO_BALL_* legacy",
-        default=True,
-    )
+    
+    # vg_target: EnumProperty(
+    #     name="VG Target",
+    #     description="Su quali oggetti Flo_* creare i vertex groups",
+    #     items=[
+    #         ('ALL', "All", ""),
+    #         ('X',   "X",   "Flo_X"),
+    #         ('Y',   "Y",   "Flo_Y"),
+    #         ('XY',  "X·Y", "Flo_XY"),
+    #     ],
+    #     default='X',
+    # )
+
+    # vg_clear_existing: BoolProperty(
+    #     name="Clear existing",
+    #     description="Rimuove prima i vertex groups FLO_NEI_* e pulisce eventuali FLO_BALL_* legacy",
+    #     default=True,
+    # )
 
     
 

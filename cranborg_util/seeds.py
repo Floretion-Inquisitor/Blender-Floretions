@@ -262,10 +262,26 @@ def make_seed_from_string(input_str: str, order: int | None = None) -> Floretion
     Parsing generico:
       - se order è fornito: usa parse_special_commands (capisce Cn/Cp/Cb)
       - altrimenti: semplice Floretion.from_string
+
+    Caso speciale:
+      - "_0_" / "0" / "0.0" => costruisce una floretion quasi nulla
+        su una base valida dell'ordine richiesto, così il build non esplode.
     """
     text = (input_str or "").strip()
     if not text:
         raise ValueError("Empty floretion string.")
+
+    zero_tokens = {"_0_", "0", "0.0", "+0", "-0", "+0.0", "-0.0"}
+    if text in zero_tokens:
+        ord_eff = int(order) if order is not None and int(order) > 0 else 1
+        base_oct = "7" * ord_eff
+        base_dec = int(base_oct, 8)
+        return Floretion(
+            coeffs_of_base_vecs=np.array([1.0e-9], dtype=float),
+            base_vecs=np.array([base_dec], dtype=int),
+            format_type="dec",
+        )
+
     if order is not None and order > 0:
         return parse_special_commands(text, order)
     return Floretion.from_string(text)

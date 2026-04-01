@@ -129,7 +129,7 @@ def build_geometry(
 
     n = len(coeffs_geom)
     if n == 0:
-        return [], [], [], [], []
+        return [], [], [], [], [], []
 
     # normalizzazioni per z-mode (basato su coeffs_geom, che può essere idx_norm)
     max_abs_coeff = float(np.max(np.abs(coeffs_geom))) if np.any(coeffs_geom) else 1.0
@@ -152,7 +152,7 @@ def build_geometry(
     for i in range(n):
         coeff_z = float(coeffs_geom[i])
         coeff_flag = float(coeffs_flag[i])
-        (x, y) = coords[i]
+        coord = coords[i]
         color_bgr = colors_bgr[i]
         bright = float(brightness[i])
         oct_str = str(oct_strings[i])
@@ -161,15 +161,24 @@ def build_geometry(
         except Exception:
             base_dec = 0
 
-        # posizione base in 2D
+        # posizione base: supporta sia coords 2D legacy sia coords 3D tetraedriche
+        if len(coord) >= 3:
+            x, y, z_base = coord[0], coord[1], coord[2]
+        else:
+            x, y = coord[0], coord[1]
+            z_base = 0.0
+
         cx = float(x) * global_scale
         cy = float(y) * global_scale
+        z_base = float(z_base) * global_scale
 
-        # z-mode
+        # z-mode additivo: nel caso tetraedrico il "grosso" della quota è già in z_base
         if z_mode == "COEFF_SIGNED" and max_abs_coeff > 0:
-            z = (coeff_z / max_abs_coeff) * z_coeff_scale
+            z_lift = (coeff_z / max_abs_coeff) * z_coeff_scale
         else:
-            z = 0.0
+            z_lift = 0.0
+
+        z = z_base + z_lift
 
         # centroid (per uso futuro / instancing)
         centroid_z = z if not use_extrude else (z - extrude * 0.5)
@@ -447,6 +456,93 @@ def ensure_floretion_zero_material() -> bpy.types.Material:
 
     return mat
 
+
+
+
+_VG_MATERIAL_PALETTE = {
+    1: (0.10, 0.25, 0.95, 1.0),
+    2: (0.10, 0.75, 0.85, 1.0),
+    3: (0.15, 0.85, 0.20, 1.0),
+    4: (0.95, 0.85, 0.15, 1.0),
+    5: (0.95, 0.55, 0.10, 1.0),
+    6: (0.95, 0.15, 0.15, 1.0),
+    7: (0.80, 0.15, 0.85, 1.0),  # 7+
+}
+
+
+def _ensure_principled_material_core(mat: bpy.types.Material):
+    """
+    Assicura un setup minimale Principled -> Output e restituisce il Principled.
+    Non distrugge tweak esistenti oltre al minimo indispensabile.
+    """
+    if mat is None:
+        raise RuntimeError("Material is None")
+
+    mat.use_nodes = True
+    nt = mat.node_tree
+    if nt is None:
+        raise RuntimeError(f"Material '{mat.name}' has no node tree")
+
+    nodes = nt.nodes
+    out = next((n for n in nodes if n.type == 'OUTPUT_MATERIAL'), None)
+    if out is None:
+        out = nodes.new("ShaderNodeOutputMaterial")
+    out.location = (300, 0)
+
+    bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    if bsdf is None:
+        bsdf = nodes.new("ShaderNodeBsdfPrincipled")
+    bsdf.location = (0, 0)
+
+    bsdf_out = bsdf.outputs.get("BSDF")
+    surf_in = out.inputs.get("Surface")
+    if bsdf_out is not None and surf_in is not None:
+        ensure_link(bsdf_out, surf_in)
+
+    return bsdf
+
+
+def ensure_floretion_vg_material(bin_idx: int) -> bpy.types.Material:
+    """
+    Materiale dedicato al bucket neighbor 1..7.
+    Nome: FloretionMaterial_VG1 .. FloretionMaterial_VG7
+    """
+    try:
+        b = int(bin_idx)
+    except Exception:
+        b = 1
+    b = max(1, min(7, b))
+
+    rgba = _VG_MATERIAL_PALETTE.get(b, _VG_MATERIAL_PALETTE[7])
+    mat_name = f"FloretionMaterial_VG{b}"
+    mat = bpy.data.materials.get(mat_name)
+    if mat is None:
+        mat = bpy.data.materials.new(mat_name)
+
+    bsdf = _ensure_principled_material_core(mat)
+
+    base_col = bsdf.inputs.get("Base Color")
+    if base_col is not None:
+        base_col.default_value = rgba
+
+    emission_in = bsdf.inputs.get("Emission") or bsdf.inputs.get("Emission Color")
+    if emission_in is not None:
+        emission_in.default_value = rgba
+
+    strength_in = bsdf.inputs.get("Emission Strength")
+    if strength_in is not None and float(strength_in.default_value) == 0.0:
+        strength_in.default_value = 1.0
+
+    alpha_in = bsdf.inputs.get("Alpha")
+    if alpha_in is not None:
+        alpha_in.default_value = 1.0
+
+    if hasattr(mat, "blend_method"):
+        mat.blend_method = 'OPAQUE'
+    if hasattr(mat, "shadow_method"):
+        mat.shadow_method = 'OPAQUE'
+
+    return mat
 
 def apply_material_preset(mat: bpy.types.Material, preset: str, *, is_zero: bool = False):
     """

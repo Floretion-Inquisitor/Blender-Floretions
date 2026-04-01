@@ -71,6 +71,7 @@ class FLORET_MESH_OT_build(Operator):
 
         try:
             flo_z = flo_x * flo_y
+            
         except Exception as e:
             msg = f"Error computing X*Y: {e}"
             self.report({'ERROR'}, msg)
@@ -131,7 +132,7 @@ class FLORET_MESH_OT_transform_input(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     target: bpy.props.EnumProperty(
-        items=[("X", "X", ""), ("Y", "Y", "")],
+        items=[("X", "X", ""), ("Y", "Y", ""), ("Z", "Z", "")],
         name="Target",
         description="Which input to transform",
         default="X",
@@ -144,6 +145,9 @@ class FLORET_MESH_OT_transform_input(Operator):
             ("PROJ_STRIP_GROW", "ProjStripGrow", ""),
             ("ROT_TRI", "RotTri", ""),
             ("SQUARE", "Square", "X -> X*X (norm to 2)"),
+            ("NOT", "Not", "Replace target with its antifloretion (elementwise_not)"),
+            ("COPY_TO_X", "to X", "Copy Z to X"),
+            ("COPY_TO_Y", "to Y", "Copy Z to Y"),
             ("CDIST", "CentroidDistance", "Replace with flo_from_centroid_distance"),
             ("BACK", "Back", ""),
             ("FORWARD", "Forward", ""),
@@ -162,53 +166,142 @@ class FLORET_MESH_OT_transform_input(Operator):
         except Exception:
             order = 1
 
+        def _set_prev_next(new_prev: str, new_next: str):
+            if self.target == "X":
+                props.x_prev_text = new_prev
+                props.x_next_text = new_next
+            elif self.target == "Y":
+                props.y_prev_text = new_prev
+                props.y_next_text = new_next
+            else:
+                props.z_prev_text = new_prev
+                props.z_next_text = new_next
+
+        def _set_target_value(new_text: str):
+            if self.target == "X":
+                props.x_string = new_text
+            elif self.target == "Y":
+                props.y_string = new_text
+            else:
+                props.z_string = new_text
+
+        def _rebuild_for_target():
+            try:
+                if self.target == "Z":
+                    bpy.ops.floret_mesh.rebuild_cached('EXEC_DEFAULT')
+                else:
+                    bpy.ops.floret_mesh.build('INVOKE_DEFAULT')
+            except Exception:
+                pass
+
+        def _commit_z_cache_from_text(z_text: str) -> bool:
+            if self.target != "Z":
+                return True
+            try:
+                flo_z_new = seeds.make_seed_from_string(z_text, order=order)
+            except Exception as e:
+                msg = f"Error parsing Z: {e}"
+                self.report({'ERROR'}, msg)
+                props.log_message = msg
+                return False
+
+            c = _cache_get() or {}
+            flo_x_cached = c.get("flo_x")
+            flo_y_cached = c.get("flo_y")
+
+            try:
+                if flo_x_cached is None:
+                    flo_x_cached = seeds.make_seed_from_string(props.x_string, order=order)
+                if flo_y_cached is None:
+                    flo_y_cached = seeds.make_seed_from_string(props.y_string, order=order)
+                _cache_set(
+                    order=order,
+                    x_string=props.x_string,
+                    y_string=props.y_string,
+                    flo_x=flo_x_cached,
+                    flo_y=flo_y_cached,
+                    flo_z=flo_z_new,
+                )
+            except Exception as e:
+                msg = f"Error updating cached Z: {e}"
+                self.report({'ERROR'}, msg)
+                props.log_message = msg
+                return False
+            return True
+
+
+        def _set_input_with_history(dst: str, new_text: str):
+            if dst == "X":
+                old = props.x_string
+                props.x_prev_text = old
+                props.x_next_text = ""
+                props.x_string = new_text
+            elif dst == "Y":
+                old = props.y_string
+                props.y_prev_text = old
+                props.y_next_text = ""
+                props.y_string = new_text
+            else:
+                old = props.z_string
+                props.z_prev_text = old
+                props.z_next_text = ""
+                props.z_string = new_text
+
         if self.target == "X":
             cur = props.x_string
             prev = props.x_prev_text
             nxt = props.x_next_text
-        else:
+        elif self.target == "Y":
             cur = props.y_string
             prev = props.y_prev_text
             nxt = props.y_next_text
-
-        def set_target_value(new_text: str):
-            if self.target == "X":
-                props.x_string = new_text
-            else:
-                props.y_string = new_text
-
-        def set_prev_next(new_prev: str, new_next: str):
-            if self.target == "X":
-                props.x_prev_text = new_prev
-                props.x_next_text = new_next
-            else:
-                props.y_prev_text = new_prev
-                props.y_next_text = new_next
+        else:
+            cur = props.z_string
+            prev = props.z_prev_text
+            nxt = props.z_next_text
 
         # History actions
         if self.action == "BACK":
             if prev:
-                set_target_value(prev)
-                set_prev_next("", cur)
-                try:
-                    bpy.ops.floret_mesh.build('INVOKE_DEFAULT')
-                except Exception:
-                    pass
+                _set_target_value(prev)
+                _set_prev_next("", cur)
+                if self.target != "Z" or _commit_z_cache_from_text(prev):
+                    _rebuild_for_target()
             return {'FINISHED'}
 
         if self.action == "FORWARD":
             if nxt:
-                set_target_value(nxt)
-                set_prev_next(cur, "")
-                try:
-                    bpy.ops.floret_mesh.build('INVOKE_DEFAULT')
-                except Exception:
-                    pass
+                _set_target_value(nxt)
+                _set_prev_next(cur, "")
+                if self.target != "Z" or _commit_z_cache_from_text(nxt):
+                    _rebuild_for_target()
+            return {'FINISHED'}
+
+        if self.action in {"COPY_TO_X", "COPY_TO_Y"}:
+            if self.target != "Z":
+                msg = "Le azioni 'to X' / 'to Y' sono disponibili solo nel pannello Z."
+                self.report({'ERROR'}, msg)
+                props.log_message = msg
+                return {'CANCELLED'}
+            dst = "X" if self.action == "COPY_TO_X" else "Y"
+            try:
+                _set_input_with_history(dst, cur)
+                bpy.ops.floret_mesh.build('INVOKE_DEFAULT')
+            except Exception as e:
+                msg = f"Error copying Z to {dst}: {e}"
+                self.report({'ERROR'}, msg)
+                props.log_message = msg
+                return {'CANCELLED'}
             return {'FINISHED'}
 
         # CDIST non dipende dal testo corrente (cur) — genera un floretion “nuovo” dalla distanza dei centroidi.
         # Questo evita l'errore dopo Clear: non ha senso richiedere un input valido se non viene usato.
         if self.action == "CDIST":
+            if self.target == "Z":
+                msg = "CentroidDistance è disponibile solo per X e Y."
+                self.report({'ERROR'}, msg)
+                props.log_message = msg
+                return {'CANCELLED'}
             try:
                 pct = float(props.cd_pct)
 
@@ -252,13 +345,9 @@ class FLORET_MESH_OT_transform_input(Operator):
                     new_text = cur
 
                 # Save history one-step
-                set_prev_next(cur, "")
-                set_target_value(new_text)
-
-                try:
-                    bpy.ops.floret_mesh.build('INVOKE_DEFAULT')
-                except Exception:
-                    pass
+                _set_prev_next(cur, "")
+                _set_target_value(new_text)
+                _rebuild_for_target()
 
                 return {'FINISHED'}
 
@@ -304,6 +393,21 @@ class FLORET_MESH_OT_transform_input(Operator):
                 except TypeError:
                     # fallback se la firma differisce
                     flo2 = flo2.normalize_coeffs(2.0)
+
+            elif self.action == "NOT":
+                try:
+                    from lib.floretion_utils.elementwise_ops import elementwise_not
+                except Exception:
+                    elementwise_not = None
+
+                if callable(elementwise_not):
+                    flo2 = elementwise_not(flo)
+                else:
+                    fn_not = getattr(flo, "elementwise_not", None)
+                    if callable(fn_not):
+                        flo2 = fn_not()
+                    else:
+                        raise RuntimeError("elementwise_not non è disponibile nella libreria floretion corrente.")
 
             elif self.action == "CDIST":
                 pct = float(props.cd_pct)
@@ -353,15 +457,147 @@ class FLORET_MESH_OT_transform_input(Operator):
             new_text = cur
 
         # Save history one-step
-        set_prev_next(cur, "")
-        set_target_value(new_text)
+        _set_prev_next(cur, "")
+        _set_target_value(new_text)
+
+        if self.target != "Z" or _commit_z_cache_from_text(new_text):
+            _rebuild_for_target()
+
+        return {'FINISHED'}
+
+
+class FLORET_MESH_OT_bitwise_op(Operator):
+    bl_idname = "floret_mesh.bitwise_op"
+    bl_label = "Build Bitwise Z"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    action: bpy.props.EnumProperty(
+        items=[
+            ("XNOR", "XNOR", "Z = X.elementwise_xnor(Y)"),
+            ("XOR",  "XOR",  "Z = X.elementwise_xor(Y)"),
+            ("AND",  "AND",  "Z = X.elementwise_and(Y)"),
+            ("OR",   "OR",   "Z = X.elementwise_or(Y)"),
+            ("NAND", "NAND", "Z = X.elementwise_nand(Y)"),
+            ("NOT_X","NOT X","Z = X.elementwise_not()"),
+            ("NOT_Y","NOT Y","Z = Y.elementwise_not()"),
+        ],
+        name="Bitwise action",
+        description="Bitwise/abelian operation used to build Z from X and Y",
+        default="XOR",
+    )
+
+    def execute(self, context):
+        scene = context.scene
+        props: FloretionMeshSettings = scene.floretion_mesh_settings
 
         try:
-            bpy.ops.floret_mesh.build('INVOKE_DEFAULT')
+            order = max(1, int(props.typical_order))
+        except Exception:
+            order = 1
+
+        try:
+            flo_x = seeds.make_seed_from_string(props.x_string, order=order)
+        except Exception as e:
+            msg = f"Error parsing X (order {order}): {e}"
+            self.report({'ERROR'}, msg)
+            props.log_message = msg
+            return {'CANCELLED'}
+
+        try:
+            flo_y = seeds.make_seed_from_string(props.y_string, order=order)
+        except Exception as e:
+            msg = f"Error parsing Y (order {order}): {e}"
+            self.report({'ERROR'}, msg)
+            props.log_message = msg
+            return {'CANCELLED'}
+
+        if flo_x.flo_order != flo_y.flo_order:
+            msg = (
+                f"Order mismatch: X has order {flo_x.flo_order}, "
+                f"Y has order {flo_y.flo_order}."
+            )
+            self.report({'ERROR'}, msg)
+            props.log_message = msg
+            return {'CANCELLED'}
+
+        try:
+            from lib.floretion_utils.elementwise_ops import (
+                elementwise_xnor,
+                elementwise_xor,
+                elementwise_and,
+                elementwise_or,
+                elementwise_not,
+                elementwise_nand,
+            )
+        except Exception:
+            elementwise_xnor = elementwise_xor = elementwise_and = None
+            elementwise_or = elementwise_not = elementwise_nand = None
+
+        def _fallback_instance_call(name: str, *args):
+            fn = getattr(args[0], name, None)
+            if callable(fn):
+                return fn(*args[1:])
+            raise RuntimeError(f"Bitwise op '{name}' is not available in the current floretion base library.")
+
+        try:
+            if self.action == "XNOR":
+                flo_z = elementwise_xnor(flo_x, flo_y) if callable(elementwise_xnor) else _fallback_instance_call("elementwise_xnor", flo_x, flo_y)
+                label = "X.elementwise_xnor(Y)"
+            elif self.action == "XOR":
+                flo_z = elementwise_xor(flo_x, flo_y) if callable(elementwise_xor) else _fallback_instance_call("elementwise_xor", flo_x, flo_y)
+                label = "X.elementwise_xor(Y)"
+            elif self.action == "AND":
+                flo_z = elementwise_and(flo_x, flo_y) if callable(elementwise_and) else _fallback_instance_call("elementwise_and", flo_x, flo_y)
+                label = "X.elementwise_and(Y)"
+            elif self.action == "OR":
+                flo_z = elementwise_or(flo_x, flo_y) if callable(elementwise_or) else _fallback_instance_call("elementwise_or", flo_x, flo_y)
+                label = "X.elementwise_or(Y)"
+            elif self.action == "NAND":
+                flo_z = elementwise_nand(flo_x, flo_y) if callable(elementwise_nand) else _fallback_instance_call("elementwise_nand", flo_x, flo_y)
+                label = "X.elementwise_nand(Y)"
+            elif self.action == "NOT_X":
+                flo_z = elementwise_not(flo_x) if callable(elementwise_not) else _fallback_instance_call("elementwise_not", flo_x)
+                label = "X.elementwise_not()"
+            elif self.action == "NOT_Y":
+                flo_z = elementwise_not(flo_y) if callable(elementwise_not) else _fallback_instance_call("elementwise_not", flo_y)
+                label = "Y.elementwise_not()"
+            else:
+                raise RuntimeError(f"Unsupported bitwise action: {self.action}")
+        except Exception as e:
+            msg = f"Error computing bitwise Z ({self.action}): {e}"
+            self.report({'ERROR'}, msg)
+            props.log_message = msg
+            return {'CANCELLED'}
+
+        try:
+            z_str = flo_z.as_floretion_notation()
+        except Exception:
+            z_str = "<error in as_floretion_notation()>"
+
+        try:
+            props.z_prev_text = props.z_string
+            props.z_next_text = ""
         except Exception:
             pass
 
-        return {'FINISHED'}
+        props.z_string = z_str
+        props.log_message = f"Built Z via {label}"
+
+        try:
+            _cache_set(
+                order=order,
+                x_string=props.x_string,
+                y_string=props.y_string,
+                flo_x=flo_x,
+                flo_y=flo_y,
+                flo_z=flo_z,
+            )
+        except Exception as e:
+            msg = f"Bitwise Z computed, but cache update failed: {e}"
+            self.report({'WARNING'}, msg)
+            props.log_message = msg
+
+        return _build_mesh_triplet(context, props, flo_x, flo_y, flo_z, op=self)
 
 
 class FLORET_MESH_OT_select_coeff_range(Operator):

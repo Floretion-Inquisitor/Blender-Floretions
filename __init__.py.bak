@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Floretion Triangle Mesh (Cranborg)",
     "author": "flore + contributors",
-    "version": (0, 2, 5),
+    "version": (0, 2, 4),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Floretion",
     "description": "Create triangle / centroid meshes from Floretions of any order",
@@ -27,12 +27,14 @@ from .cranborg_util.ops_clear_inputs import FLORET_MESH_OT_clear_input
 
 from .cranborg_util.camera_ops import (
     FLORET_MESH_OT_camera_view,
+    FLORET_MESH_OT_spin_vgs,
 )
 
 from .cranborg_util.ops_spin_vg import (
     FLORET_MESH_OT_spin_vgs,
 )
 
+# ✅ Weight Paint operators (servono per far comparire/funcionare la sezione WP nel pannello)
 from .cranborg_util.ops_weightpaint import (
     FLORET_MESH_OT_wp_setup,
     FLORET_MESH_OT_wp_bake,
@@ -47,7 +49,13 @@ from .cranborg_util.ops_vertex_groups import (
     FLORET_MESH_OT_make_nei_vertex_groups,
     FLORET_MESH_OT_remove_floretion_vertex_groups,
     FLORET_MESH_OT_reset_vg_extrusion,
+    FLORET_MESH_OT_create_vg_materials,
+    FLORET_MESH_OT_remove_vg_materials,
+    FLORET_MESH_OT_reset_vg_extrusion,
+    FLORET_MESH_OT_create_vg_materials,
+    FLORET_MESH_OT_remove_vg_materials,
 )
+ 
 
 classes = (
     FloretionMeshSettings,
@@ -62,15 +70,17 @@ classes = (
     FLORET_MESH_OT_camera_view,
     FLORET_MESH_OT_spin_vgs,
 
-    # Weight Paint
+    # ✅ Weight Paint Operators (MVP)
     FLORET_MESH_OT_wp_setup,
     FLORET_MESH_OT_wp_bake,
-
-    # Vertex groups
+    
+    # Vertex groups 
     FLORET_MESH_OT_make_nei_vertex_groups,
     FLORET_MESH_OT_remove_floretion_vertex_groups,
     FLORET_MESH_OT_reset_vg_extrusion,
-
+    FLORET_MESH_OT_create_vg_materials,
+    FLORET_MESH_OT_remove_vg_materials,
+    
     # Panels
     FLORET_MESH_PT_panel,
     FLORET_MESH_PT_camera,
@@ -87,7 +97,7 @@ def register():
 
 
 def unregister():
-    if hasattr(bpy.types.Scene, "floretion_mesh_settings"):
+    if hasattr(bpy.types.Scene, 'floretion_mesh_settings'):
         del bpy.types.Scene.floretion_mesh_settings
 
     for cls in reversed(classes):

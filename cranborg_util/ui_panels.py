@@ -7,6 +7,16 @@ import bpy
 from .ui_props import FloretionMeshSettings
 
 
+def _draw_spin_vg_legend(box):
+    sub = box.box()
+    sub.label(text="Spin VGs legend", icon='INFO')
+    col = sub.column(align=True)
+    col.label(text="Speed Mode: 0=Uniform, 1=VG, 2=Coeff lin, 3=Coeff log")
+    col.label(text="Set Position is in the Geometry Nodes modifier")
+    col.label(text="On tetra: X / Y / XY chooses the stack target")
+
+
+
 class FLORET_MESH_PT_panel(bpy.types.Panel):
     bl_label = "Floretion Triangle Mesh"
     bl_idname = "FLORET_MESH_PT_panel"
@@ -86,6 +96,12 @@ class FLORET_MESH_PT_panel(bpy.types.Panel):
         op_clear = row_ops_x.operator("floret_mesh.clear_input", text="", icon="TRASH")
         if op_clear is not None:
             op_clear.target = "X"
+
+        row_tools_x = box_x.row(align=True)
+        row_tools_x.label(text="Utility:")
+        op = row_tools_x.operator("floret_mesh.transform_input", text="Xnot", icon='MOD_BOOLEAN')
+        op.target = "X"
+        op.action = "NOT"
         # History X (Back / Forward)
         row_hist_x = box_x.row(align=True)
         row_hist_x.label(text="History:")
@@ -116,6 +132,11 @@ class FLORET_MESH_PT_panel(bpy.types.Panel):
         op = box_cd_x.operator("floret_mesh.transform_input", text="Apply to X")
         op.target = "X"
         op.action = "CDIST"
+
+        row_spin_x = box_x.row(align=True)
+        op = row_spin_x.operator("floret_mesh.spin_vgs", text="Spin VGs", icon='FORCE_TURBULENCE')
+        op.target = "X"
+        _draw_spin_vg_legend(box_x)
 
         # --------------------------------------------------
         # FLORETION Y
@@ -160,6 +181,12 @@ class FLORET_MESH_PT_panel(bpy.types.Panel):
         op_clear = row_ops_y.operator("floret_mesh.clear_input", text="", icon="TRASH")
         if op_clear is not None:
             op_clear.target = "Y"
+
+        row_tools_y = box_y.row(align=True)
+        row_tools_y.label(text="Utility:")
+        op = row_tools_y.operator("floret_mesh.transform_input", text="Ynot", icon='MOD_BOOLEAN')
+        op.target = "Y"
+        op.action = "NOT"
         # History Y
         row_hist_y = box_y.row(align=True)
         row_hist_y.label(text="History:")
@@ -185,35 +212,87 @@ class FLORET_MESH_PT_panel(bpy.types.Panel):
         op.target = "Y"
         op.action = "CDIST"
 
+        row_spin_y = box_y.row(align=True)
+        op = row_spin_y.operator("floret_mesh.spin_vgs", text="Spin VGs", icon='FORCE_TURBULENCE')
+        op.target = "Y"
+        _draw_spin_vg_legend(box_y)
+
+        # --------------------------------------------------
+        # BITWISE OPS (abelian)
+        # --------------------------------------------------
+        box_bw = layout.box()
+        box_bw.label(text="Bitwise ops (abelian)")
+
+        row_bw1 = box_bw.row(align=True)
+        op = row_bw1.operator("floret_mesh.bitwise_op", text="XxnorY")
+        op.action = "XNOR"
+        op = row_bw1.operator("floret_mesh.bitwise_op", text="XxorY")
+        op.action = "XOR"
+        op = row_bw1.operator("floret_mesh.bitwise_op", text="XandY")
+        op.action = "AND"
+        op = row_bw1.operator("floret_mesh.bitwise_op", text="XorY")
+        op.action = "OR"
+
+        row_bw2 = box_bw.row(align=True)
+        op = row_bw2.operator("floret_mesh.bitwise_op", text="XnandY")
+        op.action = "NAND"
+        op = row_bw2.operator("floret_mesh.bitwise_op", text="Xnot")
+        op.action = "NOT_X"
+        op = row_bw2.operator("floret_mesh.bitwise_op", text="Ynot")
+        op.action = "NOT_Y"
+
         # --------------------------------------------------
         # BUILD (Mesh construction / X·Y)
         # --------------------------------------------------
         box_build = layout.box()
-        box_build.label(text="Mesh Construction / X·Y")
+        box_build.label(text="Mesh Construction / X·Y", icon='MESH_DATA')
 
-        row = box_build.row(align=True)
-        row.prop(props, "spacing", text="Spacing")
-        row.prop(props, "height_mode", text="Height")
+        row_top = box_build.row(align=True)
+        row_top.prop(props, "spacing", text="Spacing")
+        row_top.prop(props, "height_mode", text="Height")
 
-        # Max height su riga dedicata + un filo di spazio prima dei checkbox (più leggibile)
-        box_build.prop(props, "max_height", text="Max height")
+        row_scale = box_build.row(align=True)
+        row_scale.prop(props, "max_height", text="Max height")
+        row_scale.prop(props, "tile_area_scaling_mode", text="Tile area scaling")
+
+        if str(props.height_mode or "flat").lower() == "coeff":
+            row_coeff_h = box_build.row(align=True)
+            row_coeff_h.prop(props, "coeff_height_scale_mode", text="Coeff height")
+            row_coeff_h.prop(props, "coeff_height_clip", text="Clip")
+
+        if props.use_tetrahedral and str(props.height_mode or "flat").lower() == "coeff":
+            row_tetra_rad = box_build.row(align=True)
+            row_tetra_rad.prop(props, "tetra_coeff_radial_mode", text="Tetra radial")
+            row_tetra_rad.prop(props, "tetra_coeff_radial_amount", text="Amount")
+
+
         try:
             box_build.separator(factor=0.35)
         except Exception:
             box_build.separator()
 
-        row2 = box_build.row(align=False)
-        row2.prop(props, "full_grid", text="Full grid (include coeff = 0)")
+        row_disp = box_build.row(align=True)
+        row_disp.prop(props, "full_grid", text="Full grid")
+        row_disp.prop(props, "include_labels", text="Labels")
 
-        row2b = box_build.row(align=True)
-        row2b.prop(props, "show_centroids", text="Show centroids")
-        row2b.prop(props, "show_curve", text="Show curve")
+        row_helpers = box_build.row(align=True)
+        row_helpers.prop(props, "use_tetrahedral", text="Tetrahedral")
+        row_helpers.prop(props, "show_centroids", text="Show centroids")
+        row_helpers.prop(props, "show_curve", text="Show curve")
 
         try:
-            row2.separator(factor=0.7)
+            box_build.separator(factor=0.35)
         except Exception:
-            pass
-        row2.prop(props, "include_labels", text="Include labels")
+            box_build.separator()
+
+        row_ext0 = box_build.row(align=True)
+        row_ext0.label(text="Extend")
+        row_ext0.prop(props, "extend_level", text="Level")
+
+        row_ext1 = box_build.row(align=True)
+        row_ext1.prop(props, "extend_mesh", text="Extend Flo_mesh")
+        row_ext1.prop(props, "extend_cent", text="Flo_cent")
+        row_ext1.prop(props, "extend_curve", text="Flo_curve")
 
         try:
             box_build.separator(factor=0.35)
@@ -221,12 +300,66 @@ class FLORET_MESH_PT_panel(bpy.types.Panel):
             box_build.separator()
 
         row3 = box_build.row(align=True)
-        row3.prop(props, "color_mode", text="Color mode")
+        row3.prop(props, "color_family", text="Color mode")
 
-        row4 = box_build.row(align=True)
-        row4.prop(props, "emission_strength", text="Emission")
-        row4.prop(props, "extrusion_depth", text="Extrusion")
+        row3b = box_build.row(align=True)
+        fam = str(getattr(props, "color_family", "STATIC") or "STATIC")
+        if fam == "NEIGHBOR":
+            row3b.prop(props, "neighbor_color_mode", text="Neighbor mode")
+        elif fam == "QUANTILE":
+            row3b.prop(props, "quantile_color_mode", text="Quantile mode")
+        else:
+            row3b.prop(props, "static_color_mode", text="Static mode")
 
+        row_quant = box_build.row()
+        row_quant.label(
+            text="Shader groups: Static / Neighbor / Quantile. Quantiles use abs(coeff).",
+            icon='SHADING_RENDERED'
+        )
+
+        row_hint = box_build.row()
+        row_hint.label(
+            text="Neighbor counts use canonical tile adjacency, independent of tile scaling.",
+            icon='INFO'
+        )
+
+        box_mask = box_build.box()
+        box_mask.label(text="Vertex Group Extrusion")
+
+        row_mat_info = box_mask.row()
+        row_mat_info.label(
+            text="VG materials are kept as datablocks; display uses the main shader.",
+            icon='INFO'
+        )
+
+        row_tools = box_mask.row(align=True)
+        row_tools.operator("floret_mesh.reset_vg_extrusion", text="Reset")
+
+        def _vg_row(prop_color, prop_val, prop_walls, label_text):
+            row = box_mask.row(align=True)
+
+            sw = row.row(align=True)
+            sw.enabled = False
+            sw.scale_x = 0.7
+            sw.prop(props, prop_color, text="")
+
+            row.prop(props, prop_val, text=label_text)
+
+            # un minimo di aria tra slider e checkbox
+            spacer = row.row(align=True)
+            spacer.scale_x = 0.35
+            spacer.label(text="")
+
+            row.prop(props, prop_walls, text="Walls")
+
+        _vg_row("vg_color_0", "mask_bin_0", "vg_wall_0", "0")
+        _vg_row("vg_color_1", "mask_bin_1", "vg_wall_1", "1")
+        _vg_row("vg_color_2", "mask_bin_2", "vg_wall_2", "2")
+        _vg_row("vg_color_3", "mask_bin_3", "vg_wall_3", "3")
+        _vg_row("vg_color_4", "mask_bin_4", "vg_wall_4", "4")
+        _vg_row("vg_color_5", "mask_bin_5", "vg_wall_5", "5")
+        _vg_row("vg_color_6", "mask_bin_6", "vg_wall_6", "6")
+        _vg_row("vg_color_7p", "mask_bin_7p", "vg_wall_7p", "7+")
         box_build.operator(
             "floret_mesh.rebuild_cached",
             text="Rebuild Meshes (cached)",
@@ -247,22 +380,56 @@ class FLORET_MESH_PT_panel(bpy.types.Panel):
 
         box_z.prop(props, "z_string", text="")
 
+        row_ops_z = box_z.row(align=True)
+        row_ops_z.label(text="Z ops:")
 
-        # ----------------------------------------
-        # VERTEX GROUPS (Glow Masks) da NEI_BOTH
-        # ----------------------------------------
-        box_vg = layout.box()
-        box_vg.label(text="Glow Masks (Vertex Groups)", icon='GROUP_VERTEX')
+        op = row_ops_z.operator("floret_mesh.transform_input", text="Tri")
+        op.target = "Z"
+        op.action = "TRI"
 
-        row = box_vg.row(align=True)
-        row.prop(props, "vg_target", text="Target")
-        row.prop(props, "vg_clear_existing", text="Clear")
+        op = row_ops_z.operator("floret_mesh.transform_input", text="Rot")
+        op.target = "Z"
+        op.action = "ROT"
 
-        row2 = box_vg.row(align=True)
-        row2.operator("floret_mesh.make_nei_vertex_groups", text="Create NEI_BOTH groups")
-        row2.operator("floret_mesh.remove_floretion_vertex_groups", text="Remove groups", icon='TRASH')
+        op = row_ops_z.operator("floret_mesh.transform_input", text="ProjStripGrow")
+        op.target = "Z"
+        op.action = "PROJ_STRIP_GROW"
 
+        op = row_ops_z.operator("floret_mesh.transform_input", text="Rot-Tri")
+        op.target = "Z"
+        op.action = "ROT_TRI"
 
+        op = row_ops_z.operator("floret_mesh.transform_input", text="Square")
+        op.target = "Z"
+        op.action = "SQUARE"
+
+        row_hist_z = box_z.row(align=True)
+        row_hist_z.label(text="History:")
+
+        op = row_hist_z.operator("floret_mesh.transform_input", text="Back")
+        op.target = "Z"
+        op.action = "BACK"
+
+        op = row_hist_z.operator("floret_mesh.transform_input", text="Forward")
+        op.target = "Z"
+        op.action = "FORWARD"
+
+        row_tools_z = box_z.row(align=True)
+        row_tools_z.label(text="Utility:")
+        op = row_tools_z.operator("floret_mesh.transform_input", text="Znot", icon='MOD_BOOLEAN')
+        op.target = "Z"
+        op.action = "NOT"
+        op = row_tools_z.operator("floret_mesh.transform_input", text="to X", icon='TRIA_LEFT')
+        op.target = "Z"
+        op.action = "COPY_TO_X"
+        op = row_tools_z.operator("floret_mesh.transform_input", text="to Y", icon='TRIA_RIGHT')
+        op.target = "Z"
+        op.action = "COPY_TO_Y"
+
+        row_spin_z = box_z.row(align=True)
+        op = row_spin_z.operator("floret_mesh.spin_vgs", text="Spin VGs", icon='FORCE_TURBULENCE')
+        op.target = "Z"
+        _draw_spin_vg_legend(box_z)
 
         # ----------------------------------------
         # WEIGHT PAINT -> BAKE (MVP)
@@ -319,11 +486,6 @@ class FLORET_MESH_PT_camera(bpy.types.Panel):
         layout = self.layout
         props = context.scene.floretion_mesh_settings
 
-        # LookAt: NON sposta la camera, solo direzione (TRACK_TO su Empty)
-        box = layout.box()
-        box.label(text="LookAt:")
-        box.prop(props, "camera_lookat", text="")
-
         # Lens: toggle ortho/persp + valore relativo
         box_lens = layout.box()
         box_lens.label(text="Lens:")
@@ -354,4 +516,17 @@ class FLORET_MESH_PT_camera(bpy.types.Panel):
         op = row.operator("floret_mesh.camera_view", text="All")
         if op is not None:
             op.target = 'ALL'
+
+        row = col.row(align=True)
+        op = row.operator("floret_mesh.camera_view", text="X_tet")
+        if op is not None:
+            op.target = 'X_TET'
+        op = row.operator("floret_mesh.camera_view", text="Y_tet")
+        if op is not None:
+            op.target = 'Y_TET'
+
+        row = col.row(align=True)
+        op = row.operator("floret_mesh.camera_view", text="XY_tet")
+        if op is not None:
+            op.target = 'XY_TET'
 

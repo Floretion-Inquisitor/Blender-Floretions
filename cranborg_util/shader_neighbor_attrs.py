@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import bmesh
+from bisect import bisect_left, bisect_right
 
 # -----------------------------
 # Layer names (coerenti col resto dell'add-on)
@@ -21,11 +22,15 @@ FACE_BASE_MIN      = "base_coeff_min"      # min globale (ripetuto su ogni face)
 FACE_BASE_MAX      = "base_coeff_max"      # max globale (ripetuto su ogni face)
 FACE_BASE_ABS_MAX  = "base_coeff_abs_max"  # max globale di abs (ripetuto su ogni face)
 
+# Nuovo: versioni quantile-based
+FACE_BASE_Q        = "base_coeff_q"        # signed quantile in [-1..1]
+FACE_BASE_ABS_Q    = "base_coeff_abs_q"    # abs quantile in [0..1]
+
 # (facoltativo ma utile per compat con altri pezzi)
 FACE_BASE_DEC = "base_dec"
 
 # -----------------------------
-# Coeff filter (IL BUG che vuoi evitare)
+# Coeff filter
 # -----------------------------
 EPS_ACTIVE = 1e-12
 
@@ -76,6 +81,48 @@ def _coeff_key(c: float, tol: float) -> int | None:
     return int(round(float(c) / float(tol)))
 
 
+def _compute_abs_quantiles(coeff_signed: list[float], eps: float = EPS_ACTIVE):
+    """
+    Restituisce due liste:
+      - abs_q in [0..1]
+      - signed_q in [-1..1]
+    basate sul rank empirico di abs(coeff).
+
+    Le facce con coeff ~ 0 ricevono 0.
+    """
+    n = len(coeff_signed)
+    abs_q = [0.0] * n
+    signed_q = [0.0] * n
+    abs_vals = [abs(float(c)) for c in coeff_signed if abs(float(c)) > eps]
+
+    if not abs_vals:
+        return abs_q, signed_q
+
+    sorted_abs = sorted(abs_vals)
+    count = len(sorted_abs)
+
+    for i, c in enumerate(coeff_signed):
+        a = abs(float(c))
+        if a <= eps:
+            abs_q[i] = 0.0
+            signed_q[i] = 0.0
+            continue
+
+        if count == 1:
+            q = 1.0
+        else:
+            left = bisect_left(sorted_abs, a)
+            right = bisect_right(sorted_abs, a)
+            midrank = 0.5 * (left + right - 1)
+            q = midrank / float(count - 1)
+
+        q = max(0.0, min(1.0, q))
+        abs_q[i] = q
+        signed_q[i] = q if c >= 0.0 else -q
+
+    return abs_q, signed_q
+
+
 def compute_neighbor_counts_bmesh(
     bm: bmesh.types.BMesh,
     face_coeffs: list[float],
@@ -86,12 +133,16 @@ def compute_neighbor_counts_bmesh(
     coeff_rel_tol: float = COEFF_REL_TOL,
 ):
     """
-    Conta i vicini per faccia usando link_faces su edge/vertici, MA:
-    un vicino j viene conteggiato solo se:
-      - è topologicamente adiacente (edge o vert)
-      - coeff_j ~ coeff_i (entro tolleranza)
+    Conta i vicini per faccia usando SOLO la topologia canonica.
 
-    Ritorna dict con edges[], verts_only[], both[].
+    Differenza importante rispetto alla versione precedente:
+      - un vicino viene contato se è topologicamente adiacente
+        e ha coefficiente non nullo
+      - NON richiediamo più coeff_j ~ coeff_i
+
+    Questo evita pattern anisotropi/“a strisce” quando la floretion viene
+    costruita da trasformazioni come centroid-distance: i gruppi vicini devono
+    riflettere la geometria locale, non classi di coefficiente.
     """
     bm.faces.ensure_lookup_table()
     n = len(bm.faces)
@@ -110,21 +161,14 @@ def compute_neighbor_counts_bmesh(
     if max_abs <= eps:
         max_abs = 1.0
 
-    # tolleranza effettiva (assoluta + relativa alla scala globale)
-    tol_eff = max(float(coeff_abs_tol), float(coeff_rel_tol) * float(max_abs))
-
-    keys = [_coeff_key(c, tol_eff) for c in coeffs]
-    active = [abs(coeffs[i]) > eps for i in range(n)]
-
     edges_counts = [0] * n
     verts_counts = [0] * n
     both_counts  = [0] * n
 
+    active = [abs(coeffs[i]) > eps for i in range(n)]
+
     for i, f in enumerate(bm.faces):
         if not active[i]:
-            continue
-        ki = keys[i]
-        if ki is None:
             continue
 
         edge_set = set()
@@ -133,7 +177,7 @@ def compute_neighbor_counts_bmesh(
                 if nf is f:
                     continue
                 j = getattr(nf, "index", -1)
-                if 0 <= j < n and active[j] and keys[j] == ki:
+                if 0 <= j < n and active[j]:
                     edge_set.add(j)
 
         vert_set = set()
@@ -142,7 +186,7 @@ def compute_neighbor_counts_bmesh(
                 if nf is f:
                     continue
                 j = getattr(nf, "index", -1)
-                if 0 <= j < n and active[j] and keys[j] == ki:
+                if 0 <= j < n and active[j]:
                     vert_set.add(j)
 
         verts_only = vert_set.difference(edge_set)
@@ -160,7 +204,7 @@ def write_neighbor_bmesh_layers(
     counts: dict,
     face_coeffs: list[float] | None = None,
     *,
-    face_base_decs: list[int] | None = None,  # <-- compat col callsite :contentReference[oaicite:1]{index=1}
+    face_base_decs: list[int] | None = None,
     face_edges_name: str = FACE_EDGES,
     face_verts_name: str = FACE_VERTS,
     face_both_name: str  = FACE_BOTH,
@@ -169,6 +213,8 @@ def write_neighbor_bmesh_layers(
     face_base_min_name: str = FACE_BASE_MIN,
     face_base_max_name: str = FACE_BASE_MAX,
     face_base_abs_max_name: str = FACE_BASE_ABS_MAX,
+    face_base_q_name: str = FACE_BASE_Q,
+    face_base_abs_q_name: str = FACE_BASE_ABS_Q,
     corner_edges_name: str = CORNER_EDGES,
     corner_verts_name: str = CORNER_VERTS,
     corner_both_name: str  = CORNER_BOTH,
@@ -185,7 +231,6 @@ def write_neighbor_bmesh_layers(
     both  = counts.get("both")  or [0] * n
     eps = float(counts.get("eps") or EPS_ACTIVE)
 
-    # --- FACE float layers ---
     lay_f = bm.faces.layers.float
     le  = lay_f.get(face_edges_name) or lay_f.new(face_edges_name)
     lv  = lay_f.get(face_verts_name) or lay_f.new(face_verts_name)
@@ -196,14 +241,14 @@ def write_neighbor_bmesh_layers(
     lbc_min  = lay_f.get(face_base_min_name)     or lay_f.new(face_base_min_name)
     lbc_max  = lay_f.get(face_base_max_name)     or lay_f.new(face_base_max_name)
     lbc_amax = lay_f.get(face_base_abs_max_name) or lay_f.new(face_base_abs_max_name)
+    lbc_q    = lay_f.get(face_base_q_name)       or lay_f.new(face_base_q_name)
+    lbc_absq = lay_f.get(face_base_abs_q_name)   or lay_f.new(face_base_abs_q_name)
 
-    # --- FACE int layer (base_dec) se disponibile ---
     lay_bd = None
     if face_base_decs is not None:
         lay_i = bm.faces.layers.int
         lay_bd = lay_i.get(base_dec_name) or lay_i.new(base_dec_name)
 
-    # --- CORNER color layers ---
     loop_layers = _layer_loops_color(bm)
     if loop_layers is None:
         loop_edges = loop_verts = loop_both = None
@@ -212,7 +257,6 @@ def write_neighbor_bmesh_layers(
         loop_verts = loop_layers.get(corner_verts_name) or loop_layers.new(corner_verts_name)
         loop_both  = loop_layers.get(corner_both_name)  or loop_layers.new(corner_both_name)
 
-    # coeff signed per face
     coeff_signed = [0.0] * n
     if face_coeffs:
         for i in range(min(n, len(face_coeffs))):
@@ -221,7 +265,6 @@ def write_neighbor_bmesh_layers(
             except Exception:
                 coeff_signed[i] = 0.0
 
-    # statistiche globali (solo facce "attive")
     active_coeffs = [c for c in coeff_signed if abs(c) > eps]
     if active_coeffs:
         coeff_min = min(active_coeffs)
@@ -232,32 +275,32 @@ def write_neighbor_bmesh_layers(
         coeff_max = 0.0
         abs_max = 0.0
 
+    abs_q, signed_q = _compute_abs_quantiles(coeff_signed, eps=eps)
+
     for i, f in enumerate(bm.faces):
         e = int(edges[i]) if i < len(edges) else 0
         v = int(verts[i]) if i < len(verts) else 0
         b = int(both[i])  if i < len(both)  else 0
 
-        # neighbor counts
         f[le] = float(e)
         f[lv] = float(v)
         f[lb] = float(b)
 
-        # base coeff + stats
         c = float(coeff_signed[i]) if i < len(coeff_signed) else 0.0
         f[lbc] = c
         f[lbc_abs] = float(abs(c))
         f[lbc_min] = float(coeff_min)
         f[lbc_max] = float(coeff_max)
         f[lbc_amax] = float(abs_max)
+        f[lbc_q] = float(signed_q[i])
+        f[lbc_absq] = float(abs_q[i])
 
-        # base_dec
         if lay_bd is not None and face_base_decs is not None:
             try:
                 f[lay_bd] = int(face_base_decs[i]) if i < len(face_base_decs) else 0
             except Exception:
                 f[lay_bd] = 0
 
-        # colori per corner
         if loop_edges is not None:
             ce = _palette_color(e)
             cv = _palette_color(v)
